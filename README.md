@@ -84,18 +84,18 @@ mern-compose/
 
 ---
 
-## ☁️ MongoDB Atlas Cloud Configuration
+## 🗄️ MongoDB Docker Container Configuration
 
-The application is configured to connect to your **MongoDB Atlas** cloud cluster.
+The application is configured to run with a dedicated **MongoDB 7.0 Docker container** with persistent storage:
 
-1. **Environment Variables**:
-   In `.env` and `backend/.env`:
+1. **Docker Compose Configuration**:
+   The `mongo` service starts automatically, initializes root credentials (`admin`/`adminpassword`), and mounts persistent storage to the `mongo_data` named volume (`/data/db`).
    ```env
-   MONGO_URI=mongodb+srv://<username>:<password>@cluster0.lcjvbj2.mongodb.net/mern_db?retryWrites=true&w=majority
-   MONGODB_URI=mongodb+srv://<username>:<password>@cluster0.lcjvbj2.mongodb.net/mern_db?retryWrites=true&w=majority
+   # Connection URI used by backend inside docker-compose
+   MONGO_URI=mongodb://admin:adminpassword@mongo:27017/mern_db?authSource=admin
    ```
-2. **Local Fallback**:
-   If running a local MongoDB Docker container instead, simply switch `MONGO_URI` to:
+2. **Local Host Development**:
+   If running the backend on the host machine (`npm run dev`) while the MongoDB container runs in Docker, connect via the mapped port:
    ```env
    MONGO_URI=mongodb://admin:adminpassword@localhost:27017/mern_db?authSource=admin
    ```

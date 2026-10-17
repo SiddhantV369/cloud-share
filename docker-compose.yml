@@ -1,68 +1,11 @@
 services:
   # ------------------------------------------------------------
-  # Backend API Service: Node.js / Express
-  # ------------------------------------------------------------
-  backend:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: mern_backend
-    restart: unless-stopped
-    environment:
-      PORT: ${PORT:-5000}
-      MONGO_URI: ${MONGO_URI}
-      NODE_ENV: ${NODE_ENV:-production}
-      UPLOAD_DIR: /app/uploads
-    ports:
-      - "${PORT:-5000}:5000"
-    volumes:
-      - backend_uploads:/app/uploads
-    networks:
-      - mern_network
-
-  # ------------------------------------------------------------
-  # Frontend UI Service: Production React (Nginx Alpine)
-  # ------------------------------------------------------------
-  frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-    container_name: mern_frontend
-    restart: unless-stopped
-    ports:
-      - "${CLIENT_PORT:-3000}:3000"
-    depends_on:
-      - backend
-    networks:
-      - mern_network
-
-  # ------------------------------------------------------------
-  # Reverse Proxy Service: Nginx Gateway (Port 80)
-  # ------------------------------------------------------------
-  nginx:
-    image: nginx:alpine
-    container_name: mern_nginx
-    restart: unless-stopped
-    ports:
-      - "${NGINX_PORT:-80}:80"
-    volumes:
-      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
-    depends_on:
-      - frontend
-      - backend
-    networks:
-      - mern_network
-
-  # ------------------------------------------------------------
-  # Optional Local MongoDB Container (used only if not on Atlas)
-  # Activated with: docker compose --profile local-db up
+  # Database Service: MongoDB Docker Container
   # ------------------------------------------------------------
   mongo:
     image: mongo:7.0
     container_name: mern_mongo
     restart: unless-stopped
-    profiles:
-      - local-db
     environment:
       MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:-admin}
       MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-adminpassword}
@@ -80,11 +23,71 @@ services:
       retries: 5
       start_period: 10s
 
+  # ------------------------------------------------------------
+  # Backend API Service: Node.js / Express
+  # ------------------------------------------------------------
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: ${DOCKERHUB_USERNAME:-yourusername}/clouddrop-backend:latest
+    container_name: mern_backend
+    restart: unless-stopped
+    environment:
+      PORT: ${PORT:-5000}
+      MONGO_URI: ${MONGO_URI:-mongodb://admin:adminpassword@mongo:27017/mern_db?authSource=admin}
+      NODE_ENV: ${NODE_ENV:-production}
+      UPLOAD_DIR: /app/uploads
+    ports:
+      - "${PORT:-5000}:5000"
+    volumes:
+      - backend_uploads:/app/uploads
+    depends_on:
+      mongo:
+        condition: service_healthy
+    networks:
+      - mern_network
+
+  # ------------------------------------------------------------
+  # Frontend UI Service: Production React (Nginx Alpine)
+  # ------------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: ${DOCKERHUB_USERNAME:-yourusername}/clouddrop-frontend:latest
+    container_name: mern_frontend
+    restart: unless-stopped
+    ports:
+      - "${CLIENT_PORT:-3000}:3000"
+    depends_on:
+      - backend
+    networks:
+      - mern_network
+
+  # ------------------------------------------------------------
+  # Reverse Proxy Service: Nginx Gateway (Port 80)
+  # ------------------------------------------------------------
+  nginx:
+    build:
+      context: ./nginx
+      dockerfile: Dockerfile
+    image: ${DOCKERHUB_USERNAME:-yourusername}/clouddrop-gateway:latest
+    container_name: mern_nginx
+    restart: unless-stopped
+    ports:
+      - "${NGINX_PORT:-80}:80"
+    depends_on:
+      - frontend
+      - backend
+    networks:
+      - mern_network
+
 volumes:
-  backend_uploads:
-    name: mern_backend_uploads
   mongo_data:
     name: mern_mongo_data
+  backend_uploads:
+    name: mern_backend_uploads
 
 networks:
   mern_network:

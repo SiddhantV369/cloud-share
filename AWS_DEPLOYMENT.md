@@ -18,13 +18,15 @@ Internet (Users)
 │       ▼                              ▼                 │
 │   [ Frontend Container ]         [ Backend API ]       │
 │   (Nginx Alpine: 3000)           (Node.js: 5000)       │
-│                                      │                 │
-│                                      ▼                 │
-│                              [ Uploads Volume ]        │
-└──────────────────────────────────────┬─────────────────┘
-                                       │
-                                       ▼ SSL Connection
-                        [ MongoDB Atlas Cloud Cluster ]
+│                                      │        │        │
+│                    ┌─────────────────┘        │        │
+│                    ▼                          ▼        │
+│            [ Uploads Volume ]        [ MongoDB Container ]
+│                                      (mongo:7.0 : 27017)
+│                                               │        │
+│                                               ▼        │
+│                                      [ mongo_data Volume ]
+└────────────────────────────────────────────────────────┘
 ```
 
 ---

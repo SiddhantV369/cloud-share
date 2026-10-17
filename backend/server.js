@@ -42,12 +42,12 @@ const connectDB = async () => {
     }
 
     const maskedUri = targetUri.replace(/:([^:@]{1,})@/, ':****@');
-    console.log(`[Database] Connecting to ${isAtlas ? 'MongoDB Atlas (Cloud)' : 'MongoDB'} at: ${maskedUri}`);
+    console.log(`[Database] Connecting to ${isAtlas ? 'MongoDB Atlas (Cloud)' : 'MongoDB Docker Container'} at: ${maskedUri}`);
     await mongoose.connect(targetUri, {
       serverSelectionTimeoutMS: 8000,
     });
     isDbConnected = true;
-    console.log(`✅ [Database] ${isAtlas ? 'MongoDB Atlas (Cloud)' : 'MongoDB'} connected successfully`);
+    console.log(`✅ [Database] ${isAtlas ? 'MongoDB Atlas (Cloud)' : 'MongoDB Docker Container'} connected successfully`);
   } catch (error) {
     isDbConnected = false;
     console.error('❌ [Database] MongoDB connection error:', error.message);
@@ -144,7 +144,7 @@ app.get('/api/health', (req, res) => {
       backend: 'healthy',
       database: dbStatus,
       isCloud: isAtlas,
-      databaseType: isAtlas ? 'MongoDB Atlas (Cloud)' : 'Local MongoDB',
+      databaseType: isAtlas ? 'MongoDB Atlas (Cloud)' : 'MongoDB Docker Container',
     },
     storage: {
       uploadDir: UPLOAD_DIR,
