@@ -380,6 +380,30 @@
   font-weight: 600;
 }
 
+/* Custom manual inputs for expiration and downloads */
+.custom-input-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  animation: fadeIn 0.2s ease-in-out;
+}
+
+.custom-number-input {
+  max-width: 140px;
+}
+
+.custom-unit-select {
+  max-width: 120px;
+  cursor: pointer;
+  background-color: #ffffff;
+}
+
+.custom-input-unit-label {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
 /* Inputs */
 .input-field {
   width: 100%;
@@ -1349,4 +1373,54 @@ input:checked + .slider:before {
     grid-template-columns: 1fr;
     gap: 6px;
   }
+}
+
+/* -------------------------------------------------------------
+   Zero-Knowledge End-to-End Encryption Styles
+   ------------------------------------------------------------- */
+.badge-encrypted {
+  background: #ecfdf5;
+  border: 1px solid #a7f3d0;
+  color: #059669;
+}
+
+.pill-encrypted {
+  background: #ecfdf5;
+  border-color: #a7f3d0;
+  color: #059669;
+  font-weight: 500;
+}
+
+.encrypted-tag {
+  background: #ecfdf5;
+  border: 1px solid #a7f3d0;
+  color: #059669;
+}
+
+.e2ee-security-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  padding: 10px 14px;
+  border-radius: 10px;
+  font-size: 0.8rem;
+  color: #166534;
+  margin-top: 14px;
+  margin-bottom: 14px;
+}
+
+.decrypting-notice {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: #eff6ff;
+  border: 1px solid var(--color-blue-border);
+  padding: 12px 16px;
+  border-radius: 10px;
+  font-size: 0.85rem;
+  color: var(--color-blue-primary);
+  margin-bottom: 16px;
 }

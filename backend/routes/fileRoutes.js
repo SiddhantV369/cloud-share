@@ -43,10 +43,21 @@ const upload = multer({
   },
 });
 
-// Helper: Calculate expiration date
+// Helper: Calculate expiration date (supports presets and custom strings like '45m', '12h', '14d')
 const calculateExpiry = (option) => {
   if (!option || option === 'never') return null;
   const now = Date.now();
+  
+  // Custom duration pattern: e.g. "45m", "12h", "14d"
+  const match = String(option).trim().match(/^(\d+)\s*(m|h|d|min|mins|hour|hours|day|days)$/i);
+  if (match) {
+    const val = parseInt(match[1], 10);
+    const unit = match[2].toLowerCase()[0];
+    if (unit === 'm') return new Date(now + val * 60 * 1000);
+    if (unit === 'h') return new Date(now + val * 60 * 60 * 1000);
+    if (unit === 'd') return new Date(now + val * 24 * 60 * 60 * 1000);
+  }
+
   switch (option) {
     case '1h':
       return new Date(now + 60 * 60 * 1000);
@@ -59,6 +70,12 @@ const calculateExpiry = (option) => {
     default:
       return null;
   }
+};
+
+// Helper: Extract client device ID from request headers, query, or body
+const getRequestClientId = (req) => {
+  const id = req.headers['x-client-id'] || req.query.clientId || (req.body && req.body.clientId);
+  return id && typeof id === 'string' && id.trim().length > 0 ? id.trim() : null;
 };
 
 // Helper: Generate unique short share code
@@ -90,20 +107,31 @@ router.post('/upload', upload.single('file'), async (req, res) => {
 
     const shareCode = await generateShareCode();
     const expiresAt = calculateExpiry(expiryOption);
+    const uploaderClientId = getRequestClientId(req);
 
     const parsedMaxDownloads =
       maxDownloads && !isNaN(parseInt(maxDownloads, 10)) && parseInt(maxDownloads, 10) > 0
         ? parseInt(maxDownloads, 10)
         : null;
 
+    const isEncrypted = req.body.isEncrypted === 'true' || req.body.isEncrypted === true;
+    const encryptionIv = req.body.encryptionIv || null;
+    const encryptionSalt = req.body.encryptionSalt || null;
+    const originalMimeType = req.body.originalMimeType || req.file.mimetype || 'application/octet-stream';
+    const originalName = req.body.originalFileName || req.file.originalname;
+
     const newFile = new File({
-      originalName: req.file.originalname,
+      originalName,
       storedName: req.file.filename,
       fileSize: req.file.size,
-      mimeType: req.file.mimetype || 'application/octet-stream',
+      mimeType: originalMimeType,
       shareCode,
       description: description ? description.trim() : '',
       uploaderName: uploaderName ? uploaderName.trim() : 'Anonymous',
+      uploaderClientId,
+      isEncrypted,
+      encryptionIv,
+      encryptionSalt,
       maxDownloads: parsedMaxDownloads,
       expiresAt,
     });
@@ -125,6 +153,9 @@ router.post('/upload', upload.single('file'), async (req, res) => {
         description: newFile.description,
         uploaderName: newFile.uploaderName,
         isPasswordProtected: newFile.isPasswordProtected,
+        isEncrypted: newFile.isEncrypted,
+        encryptionIv: newFile.encryptionIv,
+        encryptionSalt: newFile.encryptionSalt,
         maxDownloads: newFile.maxDownloads,
         downloadCount: newFile.downloadCount,
         expiresAt: newFile.expiresAt,
@@ -148,7 +179,10 @@ router.post('/upload', upload.single('file'), async (req, res) => {
 // -------------------------------------------------------------
 router.get('/stats', async (req, res) => {
   try {
-    const files = await File.find();
+    const clientId = getRequestClientId(req);
+    // Only aggregate stats for files owned by this client
+    const query = clientId ? { uploaderClientId: clientId } : { _id: null };
+    const files = await File.find(query);
     const now = new Date();
 
     let totalBytes = 0;
@@ -182,7 +216,16 @@ router.get('/stats', async (req, res) => {
 router.get('/', async (req, res) => {
   try {
     const { search, category, sort } = req.query;
-    const query = {};
+    const clientId = getRequestClientId(req);
+
+    // Device Isolation: Without a client ID, return an empty array (no leakage)
+    if (!clientId) {
+      return res.json({ files: [] });
+    }
+
+    const query = {
+      uploaderClientId: clientId,
+    };
 
     // Search filter
     if (search && search.trim() !== '') {
@@ -244,6 +287,9 @@ router.get('/', async (req, res) => {
         description: f.description,
         uploaderName: f.uploaderName,
         isPasswordProtected: f.isPasswordProtected,
+        isEncrypted: f.isEncrypted || false,
+        encryptionIv: f.encryptionIv || null,
+        encryptionSalt: f.encryptionSalt || null,
         maxDownloads: f.maxDownloads,
         downloadCount: f.downloadCount,
         expiresAt: f.expiresAt,
@@ -296,6 +342,9 @@ router.get('/:shareCode', async (req, res) => {
         description: file.description,
         uploaderName: file.uploaderName,
         isPasswordProtected: file.isPasswordProtected,
+        isEncrypted: file.isEncrypted || false,
+        encryptionIv: file.encryptionIv || null,
+        encryptionSalt: file.encryptionSalt || null,
         maxDownloads: file.maxDownloads,
         downloadCount: file.downloadCount,
         expiresAt: file.expiresAt,
@@ -395,13 +444,43 @@ router.get('/:shareCode/download', async (req, res) => {
 });
 
 // -------------------------------------------------------------
-// 7. Delete File
+// 7. Track Download Event (increment download count)
+// -------------------------------------------------------------
+router.post('/:shareCode/download-count', async (req, res) => {
+  try {
+    const file = await File.findOne({ shareCode: req.params.shareCode });
+    if (!file) {
+      return res.status(404).json({ error: 'File not found' });
+    }
+
+    file.downloadCount += 1;
+    await file.save();
+
+    res.json({
+      success: true,
+      downloadCount: file.downloadCount,
+      maxDownloads: file.maxDownloads,
+      isLimitReached: file.isLimitReached(),
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// -------------------------------------------------------------
+// 8. Delete File
 // -------------------------------------------------------------
 router.delete('/:id', async (req, res) => {
   try {
+    const clientId = getRequestClientId(req);
     const file = await File.findById(req.params.id);
     if (!file) {
       return res.status(404).json({ error: 'File not found' });
+    }
+
+    // Ownership check: If file has an owner, only that client device may delete it
+    if (file.uploaderClientId && (!clientId || file.uploaderClientId !== clientId)) {
+      return res.status(403).json({ error: 'Unauthorized: You can only delete your own uploads.' });
     }
 
     // Unlink physical file

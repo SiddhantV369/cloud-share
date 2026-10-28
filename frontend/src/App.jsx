@@ -8,6 +8,7 @@ import UploadView from './components/UploadView';
 import FileExplorer from './components/FileExplorer';
 import FileModal from './components/FileModal';
 import QRCodeModal from './components/QRCodeModal';
+import { getClientId } from './utils/clientId';
 import './App.css';
 
 export default function App() {
@@ -29,7 +30,12 @@ export default function App() {
   const fetchFiles = useCallback(async () => {
     setFilesLoading(true);
     try {
-      const res = await fetch('/api/files');
+      const clientId = getClientId();
+      const res = await fetch(`/api/files?clientId=${encodeURIComponent(clientId)}`, {
+        headers: {
+          'X-Client-Id': clientId,
+        },
+      });
       const isJson = res.headers.get('content-type')?.includes('application/json');
       if (res.ok && isJson) {
         const data = await res.json();
@@ -68,7 +74,13 @@ export default function App() {
   // Handle File Deletion
   const handleDeleteFile = async (id) => {
     try {
-      const res = await fetch(`/api/files/${id}`, { method: 'DELETE' });
+      const clientId = getClientId();
+      const res = await fetch(`/api/files/${id}?clientId=${encodeURIComponent(clientId)}`, {
+        method: 'DELETE',
+        headers: {
+          'X-Client-Id': clientId,
+        },
+      });
       if (res.ok) {
         showToast('File deleted successfully', 'success');
         fetchFiles();
@@ -165,7 +177,7 @@ export default function App() {
           <UploadView
             onUploadSuccess={handleUploadSuccess}
             onShowQr={(shareUrl, fileName) => setQrModal({ shareUrl, fileName })}
-            onOpenFile={(file) => setActiveFileModal({ file })}
+            onOpenFile={(file) => setActiveFileModal({ file, shareCode: file.shareCode })}
           />
         )}
 
@@ -174,7 +186,7 @@ export default function App() {
             files={files}
             loading={filesLoading}
             onRefresh={fetchFiles}
-            onOpenFile={(file) => setActiveFileModal({ file })}
+            onOpenFile={(file) => setActiveFileModal({ file, shareCode: file.shareCode })}
             onShowQr={(shareUrl, fileName) => setQrModal({ shareUrl, fileName })}
             onDeleteFile={handleDeleteFile}
             onNavigateToUpload={() => setActiveTab('upload')}

@@ -13,8 +13,20 @@ import {
   ArrowRight,
   MessageSquare,
   Sparkles,
+  ShieldCheck,
+  Download,
 } from 'lucide-react';
-import { formatBytes } from '../utils/formatters';
+import { formatBytes, formatTimeLeft } from '../utils/formatters';
+import { getClientId } from '../utils/clientId';
+import {
+  generateRandomKey,
+  deriveKeyFromPassword,
+  generateIv,
+  generateSalt,
+  encryptBuffer,
+  bufferToBase64,
+  saveFileKey,
+} from '../utils/crypto';
 
 export default function UploadView({ onUploadSuccess, onShowQr, onOpenFile }) {
   const [dragActive, setDragActive] = useState(false);
@@ -23,8 +35,16 @@ export default function UploadView({ onUploadSuccess, onShowQr, onOpenFile }) {
   const [uploadProgress, setUploadProgress] = useState(0);
   const [errorMessage, setErrorMessage] = useState('');
 
-  // Simplistic options
-  const [expiryOption, setExpiryOption] = useState('24h');
+  // Expiration options (presets + manual/custom)
+  const [expiryOption, setExpiryOption] = useState('24h'); // '1h' | '24h' | '7d' | 'never' | 'custom'
+  const [customExpiryVal, setCustomExpiryVal] = useState('12');
+  const [customExpiryUnit, setCustomExpiryUnit] = useState('h'); // 'm' | 'h' | 'd'
+
+  // Download limit options (presets + manual/custom)
+  const [downloadLimitOption, setDownloadLimitOption] = useState('unlimited'); // 'unlimited' | '1' | '5' | '10' | 'custom'
+  const [customDownloadLimit, setCustomDownloadLimit] = useState('20');
+
+  // Security & Note
   const [enablePassword, setEnablePassword] = useState(false);
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -91,63 +111,129 @@ export default function UploadView({ onUploadSuccess, onShowQr, onOpenFile }) {
     }
 
     setUploading(true);
-    setUploadProgress(20);
+    setUploadProgress(15);
     setErrorMessage('');
 
-    const formData = new FormData();
-    formData.append('file', selectedFile);
-    formData.append('expiryOption', expiryOption);
-    if (enablePassword && password.trim()) {
-      formData.append('password', password.trim());
-    }
-    if (description.trim()) {
-      formData.append('description', description.trim());
-    }
-
-    // Progress simulation
-    const interval = setInterval(() => {
-      setUploadProgress((prev) => {
-        if (prev >= 85) {
-          clearInterval(interval);
-          return 85;
-        }
-        return prev + 15;
-      });
-    }, 120);
-
     try {
+      // 1. Read file into ArrayBuffer
+      const fileBuffer = await selectedFile.arrayBuffer();
+      const iv = generateIv();
+
+      let cryptoKey = null;
+      let keyString = null;
+      let salt = null;
+
+      // 2. Prepare encryption key
+      if (enablePassword && password.trim()) {
+        salt = generateSalt();
+        cryptoKey = await deriveKeyFromPassword(password.trim(), salt);
+      } else {
+        const keyObj = await generateRandomKey();
+        cryptoKey = keyObj.key;
+        keyString = keyObj.keyString;
+      }
+
+      // 3. Encrypt file in browser using AES-256-GCM
+      setUploadProgress(35);
+      const ciphertextBuffer = await encryptBuffer(fileBuffer, cryptoKey, iv);
+      const encryptedBlob = new Blob([ciphertextBuffer], { type: 'application/octet-stream' });
+
+      // Calculate effective expiration
+      let effectiveExpiry = expiryOption;
+      if (expiryOption === 'custom') {
+        const val = parseInt(customExpiryVal, 10);
+        if (isNaN(val) || val <= 0) {
+          throw new Error('Please enter a valid positive number for custom expiration.');
+        }
+        effectiveExpiry = `${val}${customExpiryUnit}`;
+      }
+
+      // Calculate effective max downloads
+      let effectiveMaxDownloads = null;
+      if (downloadLimitOption === 'custom') {
+        const dls = parseInt(customDownloadLimit, 10);
+        if (isNaN(dls) || dls <= 0) {
+          throw new Error('Please enter a valid positive number for download limit.');
+        }
+        effectiveMaxDownloads = String(dls);
+      } else if (downloadLimitOption !== 'unlimited') {
+        effectiveMaxDownloads = downloadLimitOption;
+      }
+
+      // 4. Prepare FormData
+      const clientId = getClientId();
+      const formData = new FormData();
+      formData.append('file', encryptedBlob, selectedFile.name);
+      formData.append('originalFileName', selectedFile.name);
+      formData.append('originalMimeType', selectedFile.type || 'application/octet-stream');
+      formData.append('isEncrypted', 'true');
+      formData.append('encryptionIv', bufferToBase64(iv));
+      if (salt) {
+        formData.append('encryptionSalt', bufferToBase64(salt));
+      }
+      formData.append('expiryOption', effectiveExpiry);
+      if (effectiveMaxDownloads) {
+        formData.append('maxDownloads', effectiveMaxDownloads);
+      }
+      formData.append('clientId', clientId);
+      if (enablePassword && password.trim()) {
+        formData.append('password', password.trim());
+      }
+      if (description.trim()) {
+        formData.append('description', description.trim());
+      }
+
+      setUploadProgress(65);
       const response = await fetch('/api/files/upload', {
         method: 'POST',
+        headers: {
+          'X-Client-Id': clientId,
+        },
         body: formData,
       });
 
-      clearInterval(interval);
       setUploadProgress(100);
-
       const data = await response.json();
       if (!response.ok) {
         throw new Error(data.error || 'Upload failed');
       }
 
-      setUploadedResult(data.file);
+      // 5. Cache encryption key locally for uploader's browser
+      if (keyString) {
+        saveFileKey(data.file.shareCode, keyString);
+      }
+
+      const fileWithKey = {
+        ...data.file,
+        encryptionKey: keyString,
+      };
+
+      setUploadedResult(fileWithKey);
       if (onUploadSuccess) {
-        onUploadSuccess(data.file);
+        onUploadSuccess(fileWithKey);
       }
     } catch (err) {
-      setErrorMessage(err.message || 'Error uploading file');
+      console.error('Encryption/Upload error:', err);
+      setErrorMessage(err.message || 'Error encrypting and uploading file');
     } finally {
-      clearInterval(interval);
       setUploading(false);
     }
   };
 
-  const getShareUrl = (code) => {
-    return `${window.location.origin}/?share=${code}`;
+  const getShareUrl = (fileObj) => {
+    if (!fileObj) return '';
+    const code = typeof fileObj === 'string' ? fileObj : fileObj.shareCode;
+    const key =
+      typeof fileObj === 'object' && fileObj.encryptionKey
+        ? fileObj.encryptionKey
+        : uploadedResult?.encryptionKey || null;
+    const base = `${window.location.origin}/?share=${code}`;
+    return key ? `${base}#key=${key}` : base;
   };
 
   const handleCopyLink = () => {
     if (!uploadedResult) return;
-    const url = getShareUrl(uploadedResult.shareCode);
+    const url = getShareUrl(uploadedResult);
     navigator.clipboard?.writeText(url);
     setLinkCopied(true);
     setTimeout(() => setLinkCopied(false), 2000);
@@ -159,6 +245,11 @@ export default function UploadView({ onUploadSuccess, onShowQr, onOpenFile }) {
     setPassword('');
     setEnablePassword(false);
     setDescription('');
+    setExpiryOption('24h');
+    setCustomExpiryVal('12');
+    setCustomExpiryUnit('h');
+    setDownloadLimitOption('unlimited');
+    setCustomDownloadLimit('20');
     setErrorMessage('');
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
@@ -184,7 +275,7 @@ export default function UploadView({ onUploadSuccess, onShowQr, onOpenFile }) {
             <input
               type="text"
               readOnly
-              value={getShareUrl(uploadedResult.shareCode)}
+              value={getShareUrl(uploadedResult)}
               className="share-link-input"
             />
             <button className="btn btn-primary" onClick={handleCopyLink}>
@@ -194,8 +285,18 @@ export default function UploadView({ onUploadSuccess, onShowQr, onOpenFile }) {
           </div>
 
           <div className="success-meta-row">
+            <span className="meta-pill pill-encrypted">
+              <ShieldCheck size={13} className="text-emerald" /> End-to-End Encrypted (AES-256)
+            </span>
             <span className="meta-pill">
-              <Clock size={13} /> Expires in: {expiryOption === 'never' ? 'Never' : expiryOption}
+              <Clock size={13} /> Expires:{' '}
+              {uploadedResult.expiresAt ? formatTimeLeft(uploadedResult.expiresAt) : 'Never'}
+            </span>
+            <span className="meta-pill">
+              <Download size={13} /> Limit:{' '}
+              {uploadedResult.maxDownloads
+                ? `${uploadedResult.maxDownloads} download${uploadedResult.maxDownloads > 1 ? 's' : ''}`
+                : 'Unlimited'}
             </span>
             {uploadedResult.isPasswordProtected && (
               <span className="meta-pill pill-locked">
@@ -209,7 +310,7 @@ export default function UploadView({ onUploadSuccess, onShowQr, onOpenFile }) {
               className="btn btn-orange"
               onClick={() =>
                 onShowQr &&
-                onShowQr(getShareUrl(uploadedResult.shareCode), uploadedResult.originalName)
+                onShowQr(getShareUrl(uploadedResult), uploadedResult.originalName)
               }
             >
               <QrIcon size={16} /> QR Code
@@ -287,7 +388,7 @@ export default function UploadView({ onUploadSuccess, onShowQr, onOpenFile }) {
           {/* Simple Settings */}
           <div className="glass-panel upload-options-card">
             <div className="options-grid">
-              {/* Auto Expiry */}
+              {/* Auto Expiry with Presets & Manual Custom Input */}
               <div className="option-group">
                 <label className="option-label">
                   <Clock size={14} /> Expiration
@@ -298,6 +399,7 @@ export default function UploadView({ onUploadSuccess, onShowQr, onOpenFile }) {
                     { label: '24 Hours', val: '24h' },
                     { label: '7 Days', val: '7d' },
                     { label: 'Never', val: 'never' },
+                    { label: 'Custom', val: 'custom' },
                   ].map((p) => (
                     <button
                       key={p.val}
@@ -309,6 +411,69 @@ export default function UploadView({ onUploadSuccess, onShowQr, onOpenFile }) {
                     </button>
                   ))}
                 </div>
+
+                {expiryOption === 'custom' && (
+                  <div className="custom-input-row mt-2">
+                    <input
+                      type="number"
+                      min="1"
+                      max="365"
+                      className="input-field custom-number-input"
+                      placeholder="Duration"
+                      value={customExpiryVal}
+                      onChange={(e) => setCustomExpiryVal(e.target.value)}
+                    />
+                    <select
+                      className="input-field custom-unit-select"
+                      value={customExpiryUnit}
+                      onChange={(e) => setCustomExpiryUnit(e.target.value)}
+                    >
+                      <option value="m">Minutes</option>
+                      <option value="h">Hours</option>
+                      <option value="d">Days</option>
+                    </select>
+                  </div>
+                )}
+              </div>
+
+              {/* Download Limit with Presets & Manual Custom Input */}
+              <div className="option-group">
+                <label className="option-label">
+                  <Download size={14} /> Download Limit
+                </label>
+                <div className="expiry-pills">
+                  {[
+                    { label: 'Unlimited', val: 'unlimited' },
+                    { label: '1 (Single-use)', val: '1' },
+                    { label: '5', val: '5' },
+                    { label: '10', val: '10' },
+                    { label: 'Custom', val: 'custom' },
+                  ].map((p) => (
+                    <button
+                      key={p.val}
+                      type="button"
+                      className={`pill-btn ${downloadLimitOption === p.val ? 'pill-active' : ''}`}
+                      onClick={() => setDownloadLimitOption(p.val)}
+                    >
+                      {p.label}
+                    </button>
+                  ))}
+                </div>
+
+                {downloadLimitOption === 'custom' && (
+                  <div className="custom-input-row mt-2">
+                    <input
+                      type="number"
+                      min="1"
+                      max="10000"
+                      className="input-field custom-number-input"
+                      placeholder="Max downloads"
+                      value={customDownloadLimit}
+                      onChange={(e) => setCustomDownloadLimit(e.target.value)}
+                    />
+                    <span className="custom-input-unit-label">downloads</span>
+                  </div>
+                )}
               </div>
 
               {/* Password Protection */}
@@ -349,7 +514,7 @@ export default function UploadView({ onUploadSuccess, onShowQr, onOpenFile }) {
               </div>
 
               {/* Message / Note */}
-              <div className="option-group full-width">
+              <div className="option-group">
                 <label className="option-label">
                   <MessageSquare size={14} /> Note for recipient (optional)
                 </label>
@@ -378,9 +543,21 @@ export default function UploadView({ onUploadSuccess, onShowQr, onOpenFile }) {
               <div className="progress-bar-bg">
                 <div className="progress-bar-fill" style={{ width: `${uploadProgress}%` }} />
               </div>
-              <span className="progress-text">Uploading... {uploadProgress}%</span>
+              <span className="progress-text">
+                {uploadProgress < 40
+                  ? '🔒 Encrypting file in browser (AES-256-GCM)...'
+                  : `Uploading encrypted file... ${uploadProgress}%`}
+              </span>
             </div>
           )}
+
+          {/* Zero-Knowledge Security Badge */}
+          <div className="e2ee-security-note">
+            <ShieldCheck size={14} className="text-emerald" />
+            <span>
+              <strong>Zero-Knowledge Encryption:</strong> Encrypted in your browser before upload.
+            </span>
+          </div>
 
           {/* Submit button */}
           <button
@@ -390,11 +567,11 @@ export default function UploadView({ onUploadSuccess, onShowQr, onOpenFile }) {
           >
             {uploading ? (
               <>
-                <div className="spinner-small" /> Uploading...
+                <div className="spinner-small" /> Encrypting & Uploading...
               </>
             ) : (
               <>
-                <UploadCloud size={18} /> Share File
+                <UploadCloud size={18} /> Encrypt & Share File
               </>
             )}
           </button>

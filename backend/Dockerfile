@@ -28,7 +28,7 @@ EXPOSE 5000
 
 # Container health check for AWS ECS / Docker Compose
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD wget --no-verbose --tries=1 --spider http://localhost:5000/api/health || exit 1
+  CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:5000/api/health || exit 1
 
 # Start server directly with Node for proper SIGTERM signal handling
 CMD ["node", "server.js"]

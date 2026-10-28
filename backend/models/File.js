@@ -38,9 +38,26 @@ const fileSchema = new mongoose.Schema(
       trim: true,
       maxLength: 100,
     },
+    uploaderClientId: {
+      type: String,
+      default: null,
+      index: true,
+    },
     isPasswordProtected: {
       type: Boolean,
       default: false,
+    },
+    isEncrypted: {
+      type: Boolean,
+      default: false,
+    },
+    encryptionIv: {
+      type: String,
+      default: null,
+    },
+    encryptionSalt: {
+      type: String,
+      default: null,
     },
     passwordSalt: {
       type: String,

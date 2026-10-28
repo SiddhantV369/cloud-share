@@ -18,8 +18,10 @@ import {
   ArrowUpDown,
   UploadCloud,
   RefreshCw,
+  ShieldCheck,
 } from 'lucide-react';
 import { formatBytes, formatTimeLeft, formatDate, getFileCategory } from '../utils/formatters';
+import { getFileKey } from '../utils/crypto';
 
 export default function FileExplorer({
   files,
@@ -89,7 +91,9 @@ export default function FileExplorer({
   }, [files, searchTerm, selectedCategory, sortBy]);
 
   const handleCopyLink = (file) => {
-    const url = `${window.location.origin}/?share=${file.shareCode}`;
+    const localKey = getFileKey(file.shareCode);
+    const base = `${window.location.origin}/?share=${file.shareCode}`;
+    const url = localKey ? `${base}#key=${localKey}` : base;
     navigator.clipboard?.writeText(url);
     setCopiedId(file.id);
     setTimeout(() => setCopiedId(null), 2000);
@@ -211,7 +215,9 @@ export default function FileExplorer({
         <div className="files-cards-grid">
           {filteredFiles.map((file) => {
             const cat = getFileCategory(file.mimeType, file.originalName);
-            const shareUrl = `${window.location.origin}/?share=${file.shareCode}`;
+            const localKey = getFileKey(file.shareCode);
+            const base = `${window.location.origin}/?share=${file.shareCode}`;
+            const shareUrl = localKey ? `${base}#key=${localKey}` : base;
             const isDeleting = deletingId === file.id;
 
             return (
@@ -224,6 +230,12 @@ export default function FileExplorer({
                   <div className="file-card-avatar">{renderIcon(cat, 22)}</div>
 
                   <div className="file-card-badges">
+                    {file.isEncrypted && (
+                      <span className="badge badge-encrypted" title="Zero-Knowledge Encrypted (AES-256)">
+                        <ShieldCheck size={10} /> E2EE
+                      </span>
+                    )}
+
                     {file.isPasswordProtected && (
                       <span className="badge badge-locked" title="Password protected">
                         <Lock size={10} /> Protected
@@ -241,7 +253,10 @@ export default function FileExplorer({
                 </div>
 
                 {/* Body */}
-                <div className="file-card-body" onClick={() => onOpenFile(file)}>
+                <div
+                  className="file-card-body"
+                  onClick={() => onOpenFile({ ...file, encryptionKey: localKey })}
+                >
                   <h4 className="file-card-title" title={file.originalName}>
                     {file.originalName}
                   </h4>
@@ -286,7 +301,7 @@ export default function FileExplorer({
 
                   <button
                     className="btn btn-secondary btn-sm"
-                    onClick={() => onOpenFile(file)}
+                    onClick={() => onOpenFile({ ...file, encryptionKey: localKey })}
                     title="View & Download"
                   >
                     <Eye size={14} />

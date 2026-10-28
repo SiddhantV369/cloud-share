@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   X,
   Download,
@@ -19,8 +19,18 @@ import {
   File as FileIcon,
   AlertCircle,
   ExternalLink,
+  ShieldCheck,
+  Key,
 } from 'lucide-react';
 import { formatBytes, formatTimeLeft, formatDate, getFileCategory } from '../utils/formatters';
+import {
+  extractKeyFromUrlHash,
+  getFileKey,
+  base64ToBuffer,
+  decryptBuffer,
+  deriveKeyFromPassword,
+  importKeyFromString,
+} from '../utils/crypto';
 
 export default function FileModal({ fileData, shareCode, onClose, onShowQr, onDownloadSuccess }) {
   const [file, setFile] = useState(fileData || null);
@@ -30,39 +40,166 @@ export default function FileModal({ fileData, shareCode, onClose, onShowQr, onDo
   // Password state
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
-  const [isUnlocked, setIsUnlocked] = useState(false);
+  const [isUnlocked, setIsUnlocked] = useState(fileData ? !fileData.isPasswordProtected : false);
   const [verifyingPassword, setVerifyingPassword] = useState(false);
   const [passwordError, setPasswordError] = useState('');
 
-  const [copied, setCopied] = useState(false);
+  // Client-Side Decryption state
+  const [manualKey, setManualKey] = useState('');
+  const [decryptedBlobUrl, setDecryptedBlobUrl] = useState(null);
+  const [isDecrypting, setIsDecrypting] = useState(false);
+  const [decryptionError, setDecryptionError] = useState('');
 
-  // Fetch file if only shareCode was provided
+  const [copied, setCopied] = useState(false);
+  const activeBlobUrlRef = useRef(null);
+  const hasDecryptedRef = useRef(false);
+
+  // Cleanup object URLs on unmount
   useEffect(() => {
-    if (!fileData && shareCode) {
-      setLoading(true);
-      fetch(`/api/files/${shareCode}`)
-        .then(async (res) => {
+    return () => {
+      if (activeBlobUrlRef.current) {
+        URL.revokeObjectURL(activeBlobUrlRef.current);
+      }
+    };
+  }, []);
+
+  // Pure helper to extract the encryption key from available sources
+  const resolveKey = (targetFile) => {
+    const code = targetFile?.shareCode || shareCode;
+    return (
+      targetFile?.encryptionKey ||
+      extractKeyFromUrlHash() ||
+      getFileKey(code) ||
+      null
+    );
+  };
+
+  // Decrypt file blob in browser memory
+  const decryptFileBlob = async (targetFile, keyOverride = null, pwdOverride = null) => {
+    const f = targetFile || file;
+    if (!f || !f.isEncrypted) return null;
+
+    setIsDecrypting(true);
+    setDecryptionError('');
+
+    try {
+      const code = f.shareCode || shareCode;
+      const pwd = pwdOverride || password;
+      let downloadEndpoint = `/api/files/${code}/download?preview=true`;
+      if (f.isPasswordProtected && pwd) {
+        downloadEndpoint += `&password=${encodeURIComponent(pwd)}`;
+      }
+
+      // 1. Fetch ciphertext binary
+      const res = await fetch(downloadEndpoint);
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || 'Failed to download encrypted data');
+      }
+      const ciphertextBuffer = await res.arrayBuffer();
+
+      // 2. Prepare CryptoKey
+      let cryptoKey = null;
+      if (f.isPasswordProtected) {
+        if (!pwd) throw new Error('Password required to decrypt');
+        const saltBuffer = base64ToBuffer(f.encryptionSalt);
+        cryptoKey = await deriveKeyFromPassword(pwd, saltBuffer);
+      } else {
+        const keyStr = keyOverride || resolveKey(f) || manualKey.trim();
+        if (!keyStr) {
+          throw new Error('Decryption key required');
+        }
+        cryptoKey = await importKeyFromString(keyStr);
+      }
+
+      // 3. Decrypt ciphertext with AES-256-GCM
+      const ivBuffer = base64ToBuffer(f.encryptionIv);
+      const plaintextBuffer = await decryptBuffer(
+        ciphertextBuffer,
+        cryptoKey,
+        new Uint8Array(ivBuffer)
+      );
+
+      // 4. Create in-memory Blob
+      const blob = new Blob([plaintextBuffer], {
+        type: f.mimeType || 'application/octet-stream',
+      });
+      const objectUrl = URL.createObjectURL(blob);
+
+      if (activeBlobUrlRef.current) {
+        URL.revokeObjectURL(activeBlobUrlRef.current);
+      }
+      activeBlobUrlRef.current = objectUrl;
+      setDecryptedBlobUrl(objectUrl);
+      hasDecryptedRef.current = true;
+      return objectUrl;
+    } catch (err) {
+      console.error('Decryption failed:', err);
+      setDecryptionError(
+        f.isPasswordProtected
+          ? 'Incorrect password. Decryption failed.'
+          : 'Invalid or missing decryption key.'
+      );
+      return null;
+    } finally {
+      setIsDecrypting(false);
+    }
+  };
+
+  // Initialize modal data & auto-decrypt once (Fixed dependency loop to prevent flashing)
+  useEffect(() => {
+    let isMounted = true;
+    hasDecryptedRef.current = false;
+
+    const initModal = async () => {
+      let currentFile = fileData;
+
+      if (!currentFile && shareCode) {
+        setLoading(true);
+        try {
+          const res = await fetch(`/api/files/${shareCode}`);
           const data = await res.json();
           if (!res.ok) {
             throw new Error(data.error || 'Failed to fetch file details');
           }
-          setFile(data.file);
-          if (!data.file.isPasswordProtected) {
-            setIsUnlocked(true);
+          if (isMounted) {
+            currentFile = data.file;
+            setFile(data.file);
+            if (!data.file.isPasswordProtected) {
+              setIsUnlocked(true);
+            }
           }
-        })
-        .catch((err) => {
-          setError(err.message);
-        })
-        .finally(() => setLoading(false));
-    } else if (fileData) {
-      setFile(fileData);
-      if (!fileData.isPasswordProtected) {
-        setIsUnlocked(true);
+        } catch (err) {
+          if (isMounted) {
+            setError(err.message);
+          }
+        } finally {
+          if (isMounted) {
+            setLoading(false);
+          }
+        }
       }
-    }
-  }, [fileData, shareCode]);
 
+      if (!currentFile || !isMounted) return;
+
+      // Auto-decrypt if not password protected and key is available
+      if (!currentFile.isPasswordProtected && currentFile.isEncrypted && !hasDecryptedRef.current) {
+        const key = resolveKey(currentFile);
+        if (key) {
+          await decryptFileBlob(currentFile, key);
+        }
+      }
+    };
+
+    initModal();
+
+    return () => {
+      isMounted = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shareCode, fileData?.id]);
+
+  // Handle password unlock
   const handleVerifyPassword = async (e) => {
     e.preventDefault();
     if (!password) {
@@ -72,18 +209,28 @@ export default function FileModal({ fileData, shareCode, onClose, onShowQr, onDo
 
     setVerifyingPassword(true);
     setPasswordError('');
+
     try {
-      const code = file?.shareCode || shareCode;
-      const res = await fetch(`/api/files/${code}/verify`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password }),
-      });
-      const data = await res.json();
-      if (res.ok && data.valid) {
-        setIsUnlocked(true);
+      if (file?.isEncrypted) {
+        const resultUrl = await decryptFileBlob(file, null, password);
+        if (resultUrl) {
+          setIsUnlocked(true);
+        } else {
+          setPasswordError('Incorrect password. Please try again.');
+        }
       } else {
-        setPasswordError(data.error || 'Incorrect password. Please try again.');
+        const code = file?.shareCode || shareCode;
+        const res = await fetch(`/api/files/${code}/verify`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password }),
+        });
+        const data = await res.json();
+        if (res.ok && data.valid) {
+          setIsUnlocked(true);
+        } else {
+          setPasswordError(data.error || 'Incorrect password. Please try again.');
+        }
       }
     } catch (err) {
       setPasswordError(`Error verifying password: ${err.message}`);
@@ -92,9 +239,18 @@ export default function FileModal({ fileData, shareCode, onClose, onShowQr, onDo
     }
   };
 
+  // Handle manual decryption key submission
+  const handleManualKeySubmit = async (e) => {
+    e.preventDefault();
+    if (!manualKey.trim()) return;
+    await decryptFileBlob(file, manualKey.trim());
+  };
+
   const getFullShareUrl = () => {
     const code = file?.shareCode || shareCode;
-    return `${window.location.origin}/?share=${code}`;
+    const key = file?.encryptionKey || extractKeyFromUrlHash() || getFileKey(code);
+    const base = `${window.location.origin}/?share=${code}`;
+    return key ? `${base}#key=${key}` : base;
   };
 
   const handleCopyLink = () => {
@@ -103,22 +259,42 @@ export default function FileModal({ fileData, shareCode, onClose, onShowQr, onDo
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const handleDownload = () => {
-    const code = file?.shareCode || shareCode;
-    let url = `/api/files/${code}/download`;
-    if (file?.isPasswordProtected && password) {
-      url += `?password=${encodeURIComponent(password)}`;
-    }
-    // Trigger download
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = file?.originalName || 'download';
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+  // Trigger file download
+  const handleDownload = async () => {
+    if (file?.isEncrypted) {
+      let targetUrl = decryptedBlobUrl;
+      if (!targetUrl) {
+        targetUrl = await decryptFileBlob(file);
+      }
+      if (!targetUrl) return;
 
-    if (onDownloadSuccess) {
-      onDownloadSuccess(file?.id);
+      const link = document.createElement('a');
+      link.href = targetUrl;
+      link.download = file?.originalName || 'download';
+      document.body.appendChild(link);
+      link.click();
+      const code = file?.shareCode || shareCode;
+      fetch(`/api/files/${code}/download-count`, { method: 'POST' }).catch(() => {});
+
+      if (onDownloadSuccess) {
+        onDownloadSuccess(file?.id);
+      }
+    } else {
+      const code = file?.shareCode || shareCode;
+      let url = `/api/files/${code}/download`;
+      if (file?.isPasswordProtected && password) {
+        url += `?password=${encodeURIComponent(password)}`;
+      }
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = file?.originalName || 'download';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+
+      if (onDownloadSuccess) {
+        onDownloadSuccess(file?.id);
+      }
     }
   };
 
@@ -140,11 +316,12 @@ export default function FileModal({ fileData, shareCode, onClose, onShowQr, onDo
   };
 
   const category = file ? getFileCategory(file.mimeType, file.originalName) : 'other';
-  const downloadUrl = file
-    ? `/api/files/${file.shareCode}/download${
-        file.isPasswordProtected && password ? `?password=${encodeURIComponent(password)}` : ''
-      }`
-    : '';
+  const effectiveKey = resolveKey(file) || manualKey.trim() || null;
+  const effectivePreviewUrl = file?.isEncrypted
+    ? decryptedBlobUrl
+    : `/api/files/${file?.shareCode}/download?preview=true${
+        file?.isPasswordProtected && password ? `&password=${encodeURIComponent(password)}` : ''
+      }`;
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -152,9 +329,7 @@ export default function FileModal({ fileData, shareCode, onClose, onShowQr, onDo
         {/* Header */}
         <div className="modal-header">
           <div className="modal-title-wrapper">
-            <div className="modal-icon-badge">
-              {renderIcon(category, 22)}
-            </div>
+            <div className="modal-icon-badge">{renderIcon(category, 22)}</div>
             <div>
               <h3>Shared File</h3>
               <p className="modal-subtitle">Ready for preview and secure download</p>
@@ -181,12 +356,10 @@ export default function FileModal({ fileData, shareCode, onClose, onShowQr, onDo
           </div>
         ) : file ? (
           <div className="file-modal-content">
-            {/* File Header Card */}
+            {/* File Metadata Card */}
             <div className="file-meta-card">
               <div className="file-meta-header">
-                <div className="file-meta-icon-large">
-                  {renderIcon(category, 36)}
-                </div>
+                <div className="file-meta-icon-large">{renderIcon(category, 36)}</div>
                 <div className="file-meta-text">
                   <h4 className="file-modal-filename" title={file.originalName}>
                     {file.originalName}
@@ -194,6 +367,13 @@ export default function FileModal({ fileData, shareCode, onClose, onShowQr, onDo
                   <div className="file-meta-tags">
                     <span className="meta-tag size-tag">{formatBytes(file.fileSize)}</span>
                     <span className="meta-tag type-tag">{file.mimeType}</span>
+
+                    {file.isEncrypted && (
+                      <span className="meta-tag encrypted-tag" title="Zero-Knowledge AES-256-GCM">
+                        <ShieldCheck size={12} className="text-emerald" /> E2EE
+                      </span>
+                    )}
+
                     {file.isPasswordProtected && (
                       <span className="meta-tag lock-tag">
                         {isUnlocked ? <Unlock size={12} /> : <Lock size={12} />}
@@ -251,7 +431,7 @@ export default function FileModal({ fileData, shareCode, onClose, onShowQr, onDo
                   <h5>Password Required</h5>
                 </div>
                 <p className="password-gate-desc">
-                  This file was protected with a password by the uploader. Enter the password to unlock.
+                  This file is encrypted and password-protected by the sender. Enter the password to unlock.
                 </p>
 
                 <div className="password-input-group">
@@ -281,58 +461,112 @@ export default function FileModal({ fileData, shareCode, onClose, onShowQr, onDo
                 <button
                   type="submit"
                   className="btn btn-primary w-full mt-3"
-                  disabled={verifyingPassword}
+                  disabled={verifyingPassword || isDecrypting}
                 >
-                  {verifyingPassword ? 'Verifying...' : 'Unlock File'}
+                  {verifyingPassword || isDecrypting ? (
+                    <>
+                      <div className="spinner-small" /> Decrypting...
+                    </>
+                  ) : (
+                    'Unlock & Decrypt'
+                  )}
+                </button>
+              </form>
+            ) : file.isEncrypted && !effectiveKey && !decryptedBlobUrl ? (
+              /* Missing Decryption Key Gate (if opened via incomplete URL) */
+              <form className="password-gate-form glass-subpanel" onSubmit={handleManualKeySubmit}>
+                <div className="password-gate-header">
+                  <Key size={20} className="text-blue" />
+                  <h5>Decryption Key Required</h5>
+                </div>
+                <p className="password-gate-desc">
+                  This file is end-to-end encrypted. The share link you followed was missing the{' '}
+                  <code>#key=...</code> fragment. Paste the key to decrypt.
+                </p>
+
+                <div className="password-input-group">
+                  <input
+                    type="text"
+                    className="input-field"
+                    placeholder="Paste decryption key"
+                    value={manualKey}
+                    onChange={(e) => setManualKey(e.target.value)}
+                    autoFocus
+                  />
+                </div>
+
+                {decryptionError && <p className="error-text">{decryptionError}</p>}
+
+                <button
+                  type="submit"
+                  className="btn btn-primary w-full mt-3"
+                  disabled={isDecrypting || !manualKey.trim()}
+                >
+                  {isDecrypting ? 'Decrypting...' : 'Decrypt File'}
                 </button>
               </form>
             ) : (
               /* Preview Area when unlocked */
               <div className="file-preview-section">
-                {category === 'images' && (
-                  <div className="image-preview-wrapper">
-                    <img
-                      src={`${downloadUrl}&preview=true`}
-                      alt={file.originalName}
-                      className="image-preview-element"
-                      loading="lazy"
-                    />
+                {isDecrypting && !decryptedBlobUrl && (
+                  <div className="decrypting-notice">
+                    <div className="spinner-small" />
+                    <span>Decrypting file locally in browser (AES-256-GCM)...</span>
                   </div>
                 )}
 
-                {category === 'media' && file.mimeType?.startsWith('audio') && (
-                  <div className="media-preview-wrapper">
-                    <audio controls className="w-full">
-                      <source src={`${downloadUrl}&preview=true`} type={file.mimeType} />
-                      Your browser does not support audio playback.
-                    </audio>
+                {decryptionError && (
+                  <div className="error-banner">
+                    <span>{decryptionError}</span>
                   </div>
                 )}
 
-                {category === 'media' && file.mimeType?.startsWith('video') && (
-                  <div className="media-preview-wrapper">
-                    <video controls className="video-preview-element">
-                      <source src={`${downloadUrl}&preview=true`} type={file.mimeType} />
-                      Your browser does not support video playback.
-                    </video>
-                  </div>
-                )}
+                {effectivePreviewUrl && (
+                  <>
+                    {category === 'images' && (
+                      <div className="image-preview-wrapper">
+                        <img
+                          src={effectivePreviewUrl}
+                          alt={file.originalName}
+                          className="image-preview-element"
+                          loading="lazy"
+                        />
+                      </div>
+                    )}
 
-                {category === 'documents' && file.mimeType?.includes('pdf') && (
-                  <div className="pdf-preview-box">
-                    <FileText size={32} className="cat-blue" />
-                    <div>
-                      <p className="pdf-preview-title">PDF Document</p>
-                      <a
-                        href={`${downloadUrl}&preview=true`}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="btn btn-secondary btn-sm"
-                      >
-                        <ExternalLink size={14} /> Open in browser tab
-                      </a>
-                    </div>
-                  </div>
+                    {category === 'media' && file.mimeType?.startsWith('audio') && (
+                      <div className="media-preview-wrapper">
+                        <audio controls className="w-full" src={effectivePreviewUrl}>
+                          Your browser does not support audio playback.
+                        </audio>
+                      </div>
+                    )}
+
+                    {category === 'media' && file.mimeType?.startsWith('video') && (
+                      <div className="media-preview-wrapper">
+                        <video controls className="video-preview-element" src={effectivePreviewUrl}>
+                          Your browser does not support video playback.
+                        </video>
+                      </div>
+                    )}
+
+                    {category === 'documents' && file.mimeType?.includes('pdf') && (
+                      <div className="pdf-preview-box">
+                        <FileText size={32} className="cat-blue" />
+                        <div>
+                          <p className="pdf-preview-title">Decrypted PDF Document</p>
+                          <a
+                            href={effectivePreviewUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="btn btn-secondary btn-sm"
+                          >
+                            <ExternalLink size={14} /> Open in new tab
+                          </a>
+                        </div>
+                      </div>
+                    )}
+                  </>
                 )}
 
                 {/* Quick Share Link Row */}
@@ -357,8 +591,17 @@ export default function FileModal({ fileData, shareCode, onClose, onShowQr, onDo
                 </div>
 
                 {/* Primary Download Button */}
-                <button className="btn btn-primary btn-large w-full mt-4" onClick={handleDownload}>
-                  <Download size={20} /> Download File ({formatBytes(file.fileSize)})
+                <button
+                  className="btn btn-primary btn-large w-full mt-4"
+                  onClick={handleDownload}
+                  disabled={isDecrypting}
+                >
+                  <Download size={20} />{' '}
+                  {isDecrypting
+                    ? 'Decrypting...'
+                    : `Download ${file.isEncrypted ? 'Decrypted ' : ''}File (${formatBytes(
+                        file.fileSize
+                      )})`}
                 </button>
               </div>
             )}
